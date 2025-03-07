@@ -1,0 +1,155 @@
+--- shibboleth.spec.org	2025-03-07 09:41:02.713263119 +0000
++++ shibboleth.spec	2025-03-07 09:51:58.249263119 +0000
+@@ -7,8 +7,11 @@ Vendor: Shibboleth Consortium
+ License: Apache-2.0
+ URL: http://shibboleth.net/
+ Source0: https://shibboleth.net/downloads/service-provider/%{version}/%{name}-sp-%{version}.tar.bz2
++Patch0:		native.logger.patch
+ Obsoletes: shibboleth-sp = 2.5.0
+ Requires: openssl
++Requires: supervisor
++Requires: nginx
+ %if 0%{?rhel} >= 6 || 0%{?amzn} == 1 || 0%{?amzn} == 2
+ Requires(pre,preun): xmltooling-schemas%{?_isa} >= 3.3.0
+ Requires(pre,preun): opensaml-schemas%{?_isa} >= 3.3.0
+@@ -20,7 +23,7 @@ Requires(pre,preun): opensaml-schemas >=
+ Requires(pre,preun): %{insserv_prereq}
+ Requires(pre,preun): %{fillup_prereq}
+ %endif
+-%if 0%{?rhel} >= 7 || 0%{?amzn2023}
++%if 0%{?rhel} >= 7 || 0%{?amzn2023} || 0%{?centos_version} >= 700
+ Requires: hostname
+ BuildRequires: systemd-devel
+ %else
+@@ -111,6 +114,7 @@ This package includes files needed for d
+ 
+ %prep
+ %setup -q -n %{name}-sp-%{version}
++%patch0 -p1
+ 
+ %build
+ %if 0%{?suse_version} >= 1300
+@@ -189,6 +193,10 @@ SYSTEMD_SHIBD="no"
+     %{__mkdir} -p $RPM_BUILD_ROOT%{_unitdir}
+     echo "%attr(0444,-,-) %{_unitdir}/shibd.service" >> rpm.filelist
+     SYSTEMD_SHIBD="$RPM_BUILD_ROOT%{_unitdir}/shibd.service"
++    echo "%attr(0444,-,-) %{_unitdir}/shibfcgi.service" >> rpm.filelist
++    SYSTEMD_SHIBFCGI="$RPM_BUILD_ROOT%{_unitdir}/shibfcgi.service"
++    echo "%attr(0444,-,-) %{_sysconfdir}/shibboleth/shibfcgi-supervisor.conf" >> rpm.filelist
++    SHIBFCGI_SUPERVISOR_CONF="$RPM_BUILD_ROOT%{_sysconfdir}/shibboleth/shibfcgi-supervisor.conf"
+ 
+     # Get run directory created at boot time.
+     %{__mkdir} -p $RPM_BUILD_ROOT%{_tmpfilesdir}
+@@ -220,7 +228,6 @@ if [ "$SYSTEMD_SHIBD" != "no" ] ; then
+ Description=Shibboleth Service Provider Daemon
+ Documentation=https://wiki.shibboleth.net/confluence/display/SP3/Home
+ After=network-online.target
+-Before=httpd.service
+ 
+ [Service]
+ Type=notify
+@@ -230,9 +237,6 @@ User=%{runuser}
+ Environment=LD_LIBRARY_PATH=/opt/shibboleth/%{_lib}
+ %endif
+ ExecStart=%{_sbindir}/shibd -f -F
+-StandardInput=null
+-StandardOutput=null
+-StandardError=journal
+ TimeoutStopSec=1m
+ TimeoutStartSec=5m
+ Restart=on-failure
+@@ -241,6 +245,40 @@ RestartSec=30s
+ [Install]
+ WantedBy=multi-user.target
+ EOF
++  cat > $SYSTEMD_SHIBFCGI <<EOF
++[Unit]
++Description=Shibboleth Fast CGI support service
++
++[Service]
++Type=forking
++ExecStart=/usr/bin/supervisord -c %{_sysconfdir}/shibboleth/shibfcgi-supervisor.conf
++
++[Install]
++WantedBy=multi-user.target
++EOF
++  cat > $SHIBFCGI_SUPERVISOR_CONF <<EOF
++[supervisord]
++logfile=%{_localstatedir}/log/shibboleth/supervisord.log
++
++[fcgi-program:shibauthorizer]
++command=%{_libdir}/shibboleth/shibauthorizer
++socket=unix://%{_localstatedir}/run/shibboleth/shibauthorizer.sock
++socket_owner=shibd:shibd
++socket_mode=0660
++user=shibd
++process_name=%%(program_name)s_%%(process_num)02d
++stdout_logfile=%{_localstatedir}/log/shibboleth/shibauthorizer.log
++stderr_logfile=%{_localstatedir}/log/shibboleth/shibauthorizer.error.log
++
++[fcgi-program:shibresponder]
++command=%{_libdir}/shibboleth/shibresponder
++socket=unix://%{_localstatedir}/run/shibboleth/shibresponder.sock
++socket_owner=shibd:shibd
++socket_mode=0660
++user=shibd
++stdout_logfile=%{_localstatedir}/log/shibboleth/shibresponder.log
++stderr_logfile=%{_localstatedir}/log/shibboleth/shibresponder.error.log
++EOF
+ elif [ "$SYSCONFIG_SHIBD" != "no" ] ; then
+     # Populate the sysconfig file.
+     cat > $SYSCONFIG_SHIBD <<EOF
+@@ -298,7 +336,9 @@ getent passwd %{runuser} >/dev/null || u
+ exit 0
+ 
+ %post
++%ifnos solaris2.8 solaris2.9 solaris2.10 solaris2.11
+ /sbin/ldconfig
++%endif
+ 
+ # Generate two keys on new installs.
+ if [ $1 -eq 1 ] ; then
+@@ -327,9 +367,13 @@ if [ $1 -gt 1 ] ; then
+         fi
+     fi
+ 
+-%if 0%{?rhel} >= 7 || 0%{?amzn2023}
++%if 0%{?rhel} >= 7 || 0%{?centos_version} >= 700
+     # Initial prep for systemd
+-    %systemd_post shibd.service
++    systemctl enable shibd.service
++    systemctl enable shibfcgi.service
++    if [ $1 -eq 1 ] ; then
++        gpasswd -a nginx shibd
++    fi
+     if [ $1 -gt 1 ] ; then
+         systemctl daemon-reload
+     fi
+@@ -462,9 +506,6 @@ exit 0
+ %config %{_initddir}/shibd
+ %{_sbindir}/rcshibd
+ %endif
+-%if 0%{?suse_version} >= 1210 || 0%{?rhel} >= 7 || 0%{?amzn2023}
+-%{_tmpfilesdir}/%{name}.conf
+-%endif
+ %{_sysconfdir}/shibboleth/example-shibboleth2.xml
+ %{_sysconfdir}/shibboleth/*.dist
+ %{_sysconfdir}/shibboleth/apache*.config
+@@ -473,7 +514,7 @@ exit 0
+ %attr(0755,root,root) %{_sysconfdir}/shibboleth/metagen.sh
+ %attr(0755,root,root) %{_sysconfdir}/shibboleth/seckeygen.sh
+ %doc %{pkgdocdir}
+-%exclude %{pkgdocdir}/api
++%{!?_without_doxygen:%exclude %{pkgdocdir}/api}
+ 
+ %files devel
+ %defattr(-,root,root,-)
+@@ -481,7 +522,7 @@ exit 0
+ %{_libdir}/libshibsp.so
+ %{_libdir}/libshibsp-lite.so
+ %{_libdir}/pkgconfig/*.pc
+-%doc %{pkgdocdir}/api
++%{!?_without_doxygen:%doc %{pkgdocdir}/api}
+ 
+ %changelog
+ * Tue Oct 22 2024 Scott Cantor <cantor.2@osu.edu> - 3.5.0-2
