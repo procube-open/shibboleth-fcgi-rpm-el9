@@ -24,7 +24,8 @@ RUN dnf -y install fcgi-devel
 RUN mkdir -p /tmp/buffer
 RUN mkdir -p /tmp/rpms
 RUN yumdownloader --destdir /tmp/rpms --arch x86_64 liblog4shib2 libsaml13 libxmltooling11-3.3.0 opensaml-schemas-3.3.0 \
-     xmltooling-schemas-3.3.0 libxerces-c-3_3 supervisor fcgi
+     xmltooling-schemas-3.3.0 libxerces-c-3_3
+RUN yumdownloader --destdir /tmp/rpms supervisor fcgi
 COPY shibboleth.spec.patch /tmp/buffer/
 COPY native.logger.patch /tmp/buffer/
 USER builder
